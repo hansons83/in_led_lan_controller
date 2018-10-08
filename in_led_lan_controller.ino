@@ -1,4 +1,3 @@
-
 /*
  Basic MQTT example
 */
@@ -73,34 +72,39 @@ static const uint8_t NUM_IOS = 8;
 static const uint8_t INPUT_HIGH_STATE = 0xFF;
 static const uint8_t INPUT_LOW_STATE = 0x00;
 static const uint8_t INPUT_PINS_START = 2;
-static const uint8_t PCA9634_ADRESS = 0x47;
+static const uint8_t PCA9634_ADDRESS = 0x47;
 
 static  uint8_t inputCounters[NUM_IOS] = {0, 0, 0, 0, 0, 0, 0, 0};
 static  byte    inputsState = 0;
 static  byte    inputsStateToPublish = 0;
 static  byte    lastinputsState = 0;
 
+
+static  uint8_t outputCurrentVal[NUM_IOS] = {0, 0, 0, 0, 0, 0, 0, 0};
+static  uint8_t outputExpectedVal[NUM_IOS] = {0, 0, 0, 0, 0, 0, 0, 0};
+static  int8_t  outputStepVal[NUM_IOS] = {0, 0, 0, 0, 0, 0, 0, 0};
+
 uint8_t PCA9634_setup()
 {
   uint8_t error = 0;
   // mode 0
-  Wire.beginTransmission( PCA9634_ADRESS );
+  Wire.beginTransmission( PCA9634_ADDRESS );
   Wire.write( 0x00 );
   Wire.write( 0x00 );
   error |= Wire.endTransmission( );
   // mode 1
-  Wire.beginTransmission( PCA9634_ADRESS );
+  Wire.beginTransmission( PCA9634_ADDRESS );
   Wire.write( 0x01 );
   Wire.write( 0x00 );
   error |= Wire.endTransmission( );
 
   // LEDOUT0
-  Wire.beginTransmission( PCA9634_ADRESS );
+  Wire.beginTransmission( PCA9634_ADDRESS );
   Wire.write( 0x0C );
   Wire.write( 0xAA );
   error |= Wire.endTransmission( );
   // LEDOUT1
-  Wire.beginTransmission( PCA9634_ADRESS );
+  Wire.beginTransmission( PCA9634_ADDRESS );
   Wire.write( 0x0D );
   Wire.write( 0xAA );
   error |= Wire.endTransmission( );
@@ -117,7 +121,7 @@ uint8_t PCA9634_write(uint8_t led, uint8_t val)
 {
   uint8_t error = 0;
   // mode 0
-  Wire.beginTransmission( PCA9634_ADRESS );
+  Wire.beginTransmission( PCA9634_ADDRESS );
   Wire.write( 0x02 + led );
   Wire.write( val );
   error |= Wire.endTransmission( );
@@ -130,10 +134,21 @@ uint8_t PCA9634_write(uint8_t led, uint8_t val)
   
   return error;
 }
+/*
+uint8_t PCA9634_read(uint8_t led)
+{
+  uint8_t retVal;
+  // mode 0
+  Wire.requestFrom( PCA9634_ADDRESS, 1, true);
+  while(!Wire.available());
+  retVal = Wire.read( );
+
+  return retVal;
+}*/
 
 void callback(char* topic, byte* payload, unsigned int length)
 {
-  int8_t ledInd = 0;
+  int8_t ledNr = 0;
   int bright = 0;
   Serial.print("Msg: ");
   Serial.println(topic);
@@ -143,10 +158,11 @@ void callback(char* topic, byte* payload, unsigned int length)
 //    Serial.print((char)payload[i]);
 //  }
 //  Serial.println("]");
+  payload[length] = 0;
 
-  ledInd = topic[TOPIC_CMD_CHANNEL_INDEX] - '0';
+  ledNr = topic[TOPIC_CMD_CHANNEL_INDEX] - '0';
   
-  if(ledInd < 1 || ledInd > NUM_IOS)
+  if(ledNr < 1 || ledNr > NUM_IOS)
   {
     Serial.println("Wrg LED");
     return;
@@ -159,7 +175,20 @@ void callback(char* topic, byte* payload, unsigned int length)
   }
   else
   {
-    PCA9634_write(ledInd-1, bright);
+    Serial.print("Exp VAL: ");
+    Serial.println(bright);
+    Serial.println(outputCurrentVal[ledNr-1]);
+    noInterrupts();
+    if(outputCurrentVal[ledNr-1] > bright)
+    {
+      outputStepVal[ledNr-1] = -1;
+    }
+    else
+    { 
+      outputStepVal[ledNr-1] = 1;
+    }
+    outputExpectedVal[ledNr-1] = bright;
+    interrupts();
   }
   /*if(length == 2 && memcmp(payload, "ON", 2) == 0)
   {
@@ -179,8 +208,9 @@ void callback(char* topic, byte* payload, unsigned int length)
   }*/
 }
 
-void readInputs()
+void readInputsUpdateOutputs()
 {
+  uint8_t outVal;
   for(uint8_t i = 0; i < NUM_IOS; ++i)
   {
     inputCounters[i] <<= 1;
@@ -204,6 +234,13 @@ void readInputs()
     {
       set_bit(inputsStateToPublish, i);
     }
+
+    if(outputCurrentVal[i] != outputExpectedVal[i])
+    {
+      outputCurrentVal[i] += outputStepVal[i];
+      PCA9634_write(i, outputCurrentVal[i]);
+    }
+
   }
   lastinputsState = inputsState;
 }
@@ -221,7 +258,7 @@ void checkInputsAndPublish(PubSubClient& client)
   
   for(uint8_t i = 0; i < NUM_IOS; ++i)
   {
-    if(get_bit(boardSettings.mode, i) && get_bit(currentInputsStateToPublish, i))
+    if(get_bit(currentInputsStateToPublish, i))
     {
       inputStateTopic[TOPIC_IN_STATE_CHANNEL_INDEX] = i + '1';
       if(get_bit(currentInputsState, i))
@@ -360,8 +397,12 @@ void setup()
   //searchI2cDevices();
 
   PCA9634_setup();
+  for(uint8_t i = 0; i < NUM_IOS; ++i)
+  {
+    PCA9634_write(i, outputCurrentVal[i]);
+  }
 
-  MsTimer2::set(2, readInputs);
+  MsTimer2::set(2, readInputsUpdateOutputs);
   MsTimer2::start();
 
   // Enable eth module.
@@ -547,7 +588,7 @@ void handleHttpServer()
       remoteClient.print((const char*)boardSettings.mqtt_password);
       remoteClient.println("<BR>");
       remoteClient.print("time: ");
-      remoteClient.print(boardSettings.timeStr);
+      remoteClient.print(boardSettings.time);
       remoteClient.println("<BR>");
 
       remoteClient.println("</FORM>");
