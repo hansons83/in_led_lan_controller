@@ -34,7 +34,7 @@ static struct StoredSettings{
   uint16_t mqtt_port;
   char     mqtt_username[32];
   char     mqtt_password[16];
-  // fade in/out time
+  // fade in/out time from 0 to 100
   uint16_t time;
 } boardSettings;
 
@@ -80,22 +80,39 @@ static  byte    inputsStateToPublish = 0;
 static  byte    lastinputsState = 0;
 
 
-static  uint8_t outputCurrentVal[NUM_IOS] = {0, 0, 0, 0, 0, 0, 0, 0};
+static  float   outputCurrentVal[NUM_IOS] = {0, 0, 0, 0, 0, 0, 0, 0};
 static  uint8_t outputExpectedVal[NUM_IOS] = {0, 0, 0, 0, 0, 0, 0, 0};
-static  int8_t  outputStepVal[NUM_IOS] = {0, 0, 0, 0, 0, 0, 0, 0};
+static  int8_t  outputStepSign[NUM_IOS] = {0, 0, 0, 0, 0, 0, 0, 0};
+
+#define PCA9634_MODE2_NMOS_INV_VAL (1<<4)
+#define PCA9634_MODE2_NMOS_OUTDRV_VAL (1<<2)
+
+#define PCA9634_LEDOUT_OFF_VAL (0)
+#define PCA9634_LEDOUT_ON_VAL  (1)
+#define PCA9634_LEDOUT_PWM_VAL (2)
+
+#define PCA9634_LED0_STATE_SHIFT 0
+#define PCA9634_LED1_STATE_SHIFT 2
+#define PCA9634_LED2_STATE_SHIFT 4
+#define PCA9634_LED3_STATE_SHIFT 6
+
+#define PCA9634_LED4_STATE_SHIFT 0
+#define PCA9634_LED5_STATE_SHIFT 2
+#define PCA9634_LED6_STATE_SHIFT 4
+#define PCA9634_LED7_STATE_SHIFT 6
 
 uint8_t PCA9634_setup()
 {
   uint8_t error = 0;
-  // mode 0
+  // mode 1
   Wire.beginTransmission( PCA9634_ADDRESS );
   Wire.write( 0x00 );
   Wire.write( 0x00 );
   error |= Wire.endTransmission( );
-  // mode 1
+  // mode 2
   Wire.beginTransmission( PCA9634_ADDRESS );
   Wire.write( 0x01 );
-  Wire.write( 0x00 );
+  Wire.write( PCA9634_MODE2_NMOS_INV_VAL | PCA9634_MODE2_NMOS_OUTDRV_VAL );
   error |= Wire.endTransmission( );
 
   // LEDOUT0
@@ -111,13 +128,13 @@ uint8_t PCA9634_setup()
 
   if(error != 0)
   {
-    Serial.print("PCA setup error: ");
+    Serial.print("PCA er: ");
     Serial.println(error);
   }
   
   return error;
 }
-uint8_t PCA9634_write(uint8_t led, uint8_t val)
+uint8_t PCA9634_write_pwm(uint8_t led, uint8_t val)
 {
   uint8_t error = 0;
   // mode 0
@@ -128,7 +145,7 @@ uint8_t PCA9634_write(uint8_t led, uint8_t val)
 
   if(error != 0)
   {
-    Serial.print("PCA write error: ");
+    Serial.print("PCA er: ");
     Serial.println(error);
   }
   
@@ -138,14 +155,18 @@ uint8_t PCA9634_write(uint8_t led, uint8_t val)
 uint8_t PCA9634_read(uint8_t led)
 {
   uint8_t retVal;
-  // mode 0
-  Wire.requestFrom( PCA9634_ADDRESS, 1, true);
+  uint8_t error = 0;
+    // mode 0
+  Wire.beginTransmission( PCA9634_ADDRESS );
+  Wire.write( 0x02 + led );
+  error |= Wire.endTransmission( );
+  Wire.requestFrom( PCA9634_ADDRESS, 1, 1);
   while(!Wire.available());
   retVal = Wire.read( );
 
   return retVal;
-}*/
-
+}
+*/
 void callback(char* topic, byte* payload, unsigned int length)
 {
   int8_t ledNr = 0;
@@ -168,7 +189,7 @@ void callback(char* topic, byte* payload, unsigned int length)
     return;
   }
   bright = atoi(payload);
-  if(bright < 0 || bright > 0xFF)
+  if(bright < 0 || bright > 100)
   {
     Serial.println("Wrg VAL");
     return;
@@ -177,15 +198,16 @@ void callback(char* topic, byte* payload, unsigned int length)
   {
     Serial.print("Exp VAL: ");
     Serial.println(bright);
+    //outputCurrentVal[ledNr-1] = PCA9634_read(ledNr-1);
     Serial.println(outputCurrentVal[ledNr-1]);
     noInterrupts();
     if(outputCurrentVal[ledNr-1] > bright)
     {
-      outputStepVal[ledNr-1] = -1;
+      outputStepSign[ledNr-1] = -1;
     }
     else
     { 
-      outputStepVal[ledNr-1] = 1;
+      outputStepSign[ledNr-1] = 1;
     }
     outputExpectedVal[ledNr-1] = bright;
     interrupts();
@@ -210,7 +232,6 @@ void callback(char* topic, byte* payload, unsigned int length)
 
 void readInputsUpdateOutputs()
 {
-  uint8_t outVal;
   for(uint8_t i = 0; i < NUM_IOS; ++i)
   {
     inputCounters[i] <<= 1;
@@ -237,8 +258,19 @@ void readInputsUpdateOutputs()
 
     if(outputCurrentVal[i] != outputExpectedVal[i])
     {
-      outputCurrentVal[i] += outputStepVal[i];
-      PCA9634_write(i, outputCurrentVal[i]);
+      outputCurrentVal[i] += (200.0f / (float)boardSettings.time) * outputStepSign[i];
+      if(outputStepSign[i] > 0)
+      {
+        if(outputCurrentVal[i] > outputExpectedVal[i])
+          outputCurrentVal[i] = outputExpectedVal[i];
+      }
+      else
+      {
+        if(outputCurrentVal[i] < outputExpectedVal[i])
+          outputCurrentVal[i] = outputExpectedVal[i];
+      }
+      Serial.println(outputCurrentVal[i]);
+      PCA9634_write_pwm(i, 2.55f*outputCurrentVal[i]);
     }
 
   }
@@ -374,6 +406,7 @@ void setup()
   {
     Serial.println("Clearing!");
     memset(&boardSettings, 0, sizeof(boardSettings));
+    boardSettings.time = 200;
     EEPROM.write(EEPROM_VERSION_OFFSET, EEPROM_VERSION);
     EEPROM.put(EEPROM_SETTINGS_OFFSET, boardSettings);
   }
@@ -399,7 +432,7 @@ void setup()
   PCA9634_setup();
   for(uint8_t i = 0; i < NUM_IOS; ++i)
   {
-    PCA9634_write(i, outputCurrentVal[i]);
+    PCA9634_write_pwm(i, outputCurrentVal[i]);
   }
 
   MsTimer2::set(2, readInputsUpdateOutputs);
@@ -460,7 +493,7 @@ void handleMqttClient()
 }
 void handleHttpServer()
 {
-//http://192.168.1.11/?ip=192.168.1.3&port=1883&user=openhabian&pwd=swiatek123&mode=00000000&
+//http://192.168.1.11/?ip=192.168.1.3&port=1883&user=openhabian&pwd=swiatek123&time=500&
   
   static const int PROGMEM srvBufferSize = 100;
   static char srvBuffer[101];
@@ -548,10 +581,19 @@ void handleHttpServer()
       if(timeStr != NULL)
       {
         timeStr += 5;
-        Serial.print("mode: ");
+        Serial.print("time: ");
         pch = strtok (timeStr, "&");
-        Serial.println(pch);
+        Serial.print(pch);
+        Serial.println("ms");
         boardSettings.time = atoi(pch);
+        if(boardSettings.time < 2)
+        {
+          boardSettings.time = 2;
+        }
+        if(boardSettings.time > 10000)
+        {
+          boardSettings.time = 10000;
+        }
       }
       if(ipStr || portStr || userStr || pwdStr || timeStr)
       {
@@ -589,6 +631,7 @@ void handleHttpServer()
       remoteClient.println("<BR>");
       remoteClient.print("time: ");
       remoteClient.print(boardSettings.time);
+      remoteClient.print("ms");
       remoteClient.println("<BR>");
 
       remoteClient.println("</FORM>");
