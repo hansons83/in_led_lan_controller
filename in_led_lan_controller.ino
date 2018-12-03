@@ -42,11 +42,10 @@ static struct StoredSettings{
 #define clear_bit(var, bit_nr) ((var) &= ~(1 << (bit_nr)))
 #define get_bit(var, bit_nr) (((var) & (1 << (bit_nr))) ? true : false)
 
-const char hex_to_char[] = {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F'};
 inline void toHexStr (byte b, char* target)
 {
-  target[0] = hex_to_char[b>>4];
-  target[1] = hex_to_char[b&0x0F];
+  target[0] = (b>>4) > 9 ? (b>>4)-10 + 'A' : (b>>4) + '0';
+  target[1] = (b&0x0F) > 9 ? (b&0x0F)-10 + 'A' : (b&0x0F) + '0';
 }
 
 static const uint8_t TOPIC_ID_START_INDEX = 6;
@@ -83,6 +82,16 @@ static  byte    lastinputsState = 0;
 static  float   outputCurrentVal[NUM_IOS] = {0, 0, 0, 0, 0, 0, 0, 0};
 static  uint8_t outputExpectedVal[NUM_IOS] = {0, 0, 0, 0, 0, 0, 0, 0};
 static  int8_t  outputStepSign[NUM_IOS] = {0, 0, 0, 0, 0, 0, 0, 0};
+static  uint8_t LEDOUT[2] = {0, 0};
+
+const unsigned char PROGMEM CIEL8[50] = {
+ 0, 1, 1, 2, 2, 3, 4, 5, 6, 7, 
+  8, 9, 11, 13, 14, 17, 19, 21, 24, 27, 
+  30, 33, 37, 41, 45, 49, 54, 59, 64, 69, 
+  75, 81, 88, 95, 102, 109, 117, 125, 134, 143, 
+  152, 162, 172, 182, 193, 205, 217, 229, 242, 255, 
+};
+#define PWM_STEP_VALS sizeof(CIEL8)
 
 #define PCA9634_MODE2_NMOS_INV_VAL (1<<4)
 #define PCA9634_MODE2_NMOS_OUTDRV_VAL (1<<2)
@@ -118,12 +127,12 @@ uint8_t PCA9634_setup()
   // LEDOUT0
   Wire.beginTransmission( PCA9634_ADDRESS );
   Wire.write( 0x0C );
-  Wire.write( 0xAA );
+  Wire.write( LEDOUT[0] );
   error |= Wire.endTransmission( );
   // LEDOUT1
   Wire.beginTransmission( PCA9634_ADDRESS );
   Wire.write( 0x0D );
-  Wire.write( 0xAA );
+  Wire.write( LEDOUT[1] );
   error |= Wire.endTransmission( );
 
   if(error != 0)
@@ -134,21 +143,50 @@ uint8_t PCA9634_setup()
   
   return error;
 }
-uint8_t PCA9634_write_pwm(uint8_t led, uint8_t val)
+uint8_t PCA9634_write_pwm(uint8_t ledInd, uint8_t val)
 {
   uint8_t error = 0;
-  // mode 0
+  uint8_t regOffset = (ledInd / 4);
+  uint8_t ledOffset = (ledInd % 4)*2;
+  uint8_t ledOutVal = LEDOUT[regOffset];
+  
+  /*Serial.print("Reg offset: ");
+  Serial.print(regOffset);
+  Serial.print(" Led offset: ");
+  Serial.println(ledOffset);
+  */
+  if(val >= 100) // Write LEDOUT register to turn on led
+  {
+    ledOutVal = ledOutVal & ~(0x03 << ledOffset) | (0x01 << ledOffset);
+  }
+  else if(val < 1)
+  {
+    ledOutVal = ledOutVal & ~(0x03 << ledOffset);
+  }
+  else
+  {
+    ledOutVal = (ledOutVal & ~(0x03 << ledOffset)) | (0x02 << ledOffset);
+  }
+  if(ledOutVal != LEDOUT[regOffset])
+  {
+    LEDOUT[regOffset] = ledOutVal;
+    Wire.beginTransmission( PCA9634_ADDRESS );
+    Wire.write( 0x0C + regOffset);
+    Wire.write( LEDOUT[regOffset]);
+    error |= Wire.endTransmission( );
+  }
+  
+  val = pgm_read_byte_near(CIEL8+(val/2));
   Wire.beginTransmission( PCA9634_ADDRESS );
-  Wire.write( 0x02 + led );
+  Wire.write( 0x02 + ledInd );
   Wire.write( val );
   error |= Wire.endTransmission( );
-
+    
   if(error != 0)
   {
     Serial.print("PCA er: ");
     Serial.println(error);
   }
-  
   return error;
 }
 /*
@@ -196,7 +234,9 @@ void callback(char* topic, byte* payload, unsigned int length)
   }
   else
   {
-    Serial.print("Exp VAL: ");
+    Serial.print("Ch: ");
+    Serial.print(ledNr);
+    Serial.print(", Val: ");
     Serial.println(bright);
     //outputCurrentVal[ledNr-1] = PCA9634_read(ledNr-1);
     Serial.println(outputCurrentVal[ledNr-1]);
@@ -269,8 +309,7 @@ void readInputsUpdateOutputs()
         if(outputCurrentVal[i] < outputExpectedVal[i])
           outputCurrentVal[i] = outputExpectedVal[i];
       }
-      Serial.println(outputCurrentVal[i]);
-      PCA9634_write_pwm(i, 2.55f*outputCurrentVal[i]);
+      PCA9634_write_pwm(i, outputCurrentVal[i]);
     }
 
   }
@@ -293,15 +332,14 @@ void checkInputsAndPublish(PubSubClient& client)
     if(get_bit(currentInputsStateToPublish, i))
     {
       inputStateTopic[TOPIC_IN_STATE_CHANNEL_INDEX] = i + '1';
+      Serial.print(inputStateTopic);
       if(get_bit(currentInputsState, i))
       {
-        Serial.print(inputStateTopic);
         Serial.println(": ON");
         client.publish((const char*)inputStateTopic, "ON");
       }
       else
       {
-        Serial.print(inputStateTopic);
         Serial.println(": OFF");
         client.publish((const char*)inputStateTopic, "OFF");
       }
@@ -356,7 +394,7 @@ void searchI2cDevices()
 {
   byte error, address;
   int nDevices;
-  Serial.println("Scanning...");
+  Serial.println(F("Scanning..."));
   nDevices = 0;
   for(address = 1; address < 127; address++ )
   {
@@ -368,7 +406,7 @@ void searchI2cDevices()
 
     if (error == 0)
     {
-      Serial.print("I2C at 0x");
+      Serial.print(F("I2C at 0x"));
       if (address<16) 
         Serial.print("0");
       Serial.print(address,HEX);
@@ -378,7 +416,7 @@ void searchI2cDevices()
     }
     else if (error==4)
     {
-      Serial.print("Err at 0x");
+      Serial.print(F("Err at 0x"));
       if (address<16)
         Serial.print("0");
       Serial.println(address,HEX);
@@ -404,7 +442,7 @@ void setup()
 
   if(EEPROM.read(EEPROM_VERSION_OFFSET) != EEPROM_VERSION)
   {
-    Serial.println("Clearing!");
+    Serial.println(F("Clearing!"));
     memset(&boardSettings, 0, sizeof(boardSettings));
     boardSettings.time = 200;
     EEPROM.write(EEPROM_VERSION_OFFSET, EEPROM_VERSION);
@@ -442,7 +480,7 @@ void setup()
   digitalWrite(A0, HIGH);
 
   mqttClient.setCallback(callback);
-  Serial.print("Eth: ");
+  Serial.print(F("Eth: "));
   //Ethernet.begin(mac, IPAddress(192, 168, 1, 6), IPAddress(255, 255, 255, 0), IPAddress(192, 168, 1, 254));
   while(!Ethernet.begin(mac))
   {
@@ -470,15 +508,15 @@ void handleMqttClient()
     if(sinceLastConnect >= 10000)
     {
       mqttClient.setServer(boardSettings.mqtt_ip, boardSettings.mqtt_port);
-      Serial.print("MQTT con...");
+      Serial.print("MQTT con... ");
       if (mqttClient.connect((const char*)(mac+2), boardSettings.mqtt_username, boardSettings.mqtt_password)) {
-        Serial.print(" conn: Sub:");
+        Serial.print("Con, Sub=");
         Serial.println(outputCommandTopic);
         mqttClient.subscribe(outputCommandTopic);
       }
       else
       {
-        Serial.print("Err, rc=");
+        Serial.print("Err, Rc=");
         Serial.println(mqttClient.state());
       }
       lastConnectMillis = millis();
@@ -601,43 +639,43 @@ void handleHttpServer()
         mqttClient.disconnect();
       }
       // Respond with current configuration
-      remoteClient.println("HTTP/1.1 200 OK");
-      remoteClient.println("Content-Type: text/html");
-      remoteClient.println();
+      remoteClient.println(F("HTTP/1.1 200 OK"));
+      remoteClient.println(F("Content-Type: text/html"));
+      remoteClient.println("");
 
-      remoteClient.println("<HTML>");
-      remoteClient.println("<HEAD>");
-      remoteClient.println("<TITLE>In/Out controller setup</TITLE>");
-      remoteClient.println("</HEAD>");
-      remoteClient.println("<BODY>");
+      remoteClient.println(F("<HTML>"));
+      remoteClient.println(F("<HEAD>"));
+      remoteClient.println(F("<TITLE>LEDIO controller setup</TITLE>"));
+      remoteClient.println(F("</HEAD>"));
+      remoteClient.println(F("<BODY>"));
 
-      remoteClient.println("<H1>Settings</H1>");
-
-      remoteClient.print("ip: ");
+      remoteClient.println(F("<PRE>"));
+      remoteClient.print(F("<H1>Settings:</H1>"));
+      remoteClient.print("MQTT ip: \t");
       for(uint8_t i = 0; i < 4; ++i)
       {
         remoteClient.print(boardSettings.mqtt_ip[i]);
         if(i < 3)remoteClient.print(".");
+        else remoteClient.println("");
       }
-      remoteClient.println("<BR>");
-      remoteClient.print("port: ");
-      remoteClient.print(boardSettings.mqtt_port);
-      remoteClient.println("<BR>");
-      remoteClient.print("user: ");
-      remoteClient.print((const char*)boardSettings.mqtt_username);
-      remoteClient.println("<BR>");
-      remoteClient.print("pwd: ");
-      remoteClient.print((const char*)boardSettings.mqtt_password);
-      remoteClient.println("<BR>");
-      remoteClient.print("time: ");
+      remoteClient.print(F("MQTT port: \t"));
+      remoteClient.println(boardSettings.mqtt_port);
+      remoteClient.print(F("MQTT user: \t"));
+      remoteClient.println((const char*)boardSettings.mqtt_username);
+      remoteClient.print(F("MQTT pwd: \t"));
+      remoteClient.println((const char*)boardSettings.mqtt_password);
+      
+      remoteClient.print(F("Fade time: \t"));
       remoteClient.print(boardSettings.time);
-      remoteClient.print("ms");
-      remoteClient.println("<BR>");
-
-      remoteClient.println("</FORM>");
-      remoteClient.println("<BR>");
-      remoteClient.println("</BODY>");
-      remoteClient.println("</HTML>");
+      remoteClient.println(F("ms"));
+      
+      remoteClient.print(F("<H1>State:</H1>"));
+      remoteClient.print(F("Subscription: \t\t"));
+      remoteClient.println(outputCommandTopic);
+      remoteClient.print(F("MQTT connection state: \t"));
+      remoteClient.println(mqttClient.state());
+      
+      remoteClient.println(F("</PRE>"));
       
       delay(1);
       //stopping client
